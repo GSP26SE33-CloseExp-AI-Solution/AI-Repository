@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api import health, ocr, pricing
+from app.api import health, ocr, pricing, vision
 from app.core.config import settings
 from app.core.logging import setup_logging
 
@@ -16,6 +16,7 @@ def create_app() -> FastAPI:
     application.include_router(health.router)
     application.include_router(ocr.router, prefix="/v1/ocr")
     application.include_router(pricing.router, prefix="/v1/pricing")
+    application.include_router(vision.router, prefix="/v1/vision")
     return application
 
 
