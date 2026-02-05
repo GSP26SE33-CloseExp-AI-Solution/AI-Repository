@@ -6,7 +6,10 @@ AI Service cho hệ thống quản lý sản phẩm sắp hết hạn (CloseExp)
 
 ### 1. OCR Service (`/v1/ocr`)
 - Trích xuất ngày hết hạn (HSD) và ngày sản xuất (NSX) từ hình ảnh
-- Nhận dạng barcode/QR code
+- Nhận dạng barcode/QR code với hỗ trợ **mã vạch Việt Nam (GS1 893)**
+- Tra cứu thông tin công ty từ mã vạch (Vinamilk, TH True Milk, Masan, Acecook, ...)
+- Trích xuất thành phần, hướng dẫn bảo quản, thông tin dinh dưỡng từ bao bì
+- Nhận dạng xuất xứ và chứng nhận chất lượng (HACCP, ISO, VietGAP, ...)
 - Hỗ trợ tiếng Việt và tiếng Anh
 - Trả về độ tin cậy cho mỗi trường
 
@@ -25,6 +28,13 @@ AI Service cho hệ thống quản lý sản phẩm sắp hết hạn (CloseExp)
 - Phân loại sản phẩm theo danh mục
 - Trả về hình ảnh đã đánh dấu (annotated)
 
+### 4. Fresh Produce Service (`/v1/fresh-produce`) - **MỚI**
+- Nhận dạng sản phẩm tươi sống: rau củ, trái cây, thịt, hải sản
+- Cung cấp tên tiếng Việt và tiếng Anh
+- Thông tin thời hạn sử dụng điển hình
+- Hướng dẫn bảo quản phù hợp
+- Các chỉ báo nhận biết độ tươi của sản phẩm
+
 ## Cấu trúc Project
 
 ```
@@ -35,6 +45,7 @@ app/
 │   ├── ocr.py             # OCR endpoints
 │   ├── pricing.py         # Pricing endpoints
 │   ├── vision.py          # Vision endpoints
+│   ├── fresh_produce.py   # Fresh produce endpoints (NEW)
 │   └── deps.py            # Dependencies
 ├── core/                   # Core configurations
 │   ├── config.py          # Settings
@@ -49,7 +60,8 @@ app/
 ├── services/               # Business logic
 │   ├── ocr.py             # OCR service
 │   ├── pricing.py         # Pricing service
-│   └── vision.py          # Vision service
+│   ├── vision.py          # Vision service
+│   └── vietnamese_product.py  # Vietnamese product recognition (NEW)
 ├── infra/                  # Infrastructure
 │   └── model_store.py     # Model management
 └── utils/                  # Utilities

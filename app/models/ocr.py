@@ -32,15 +32,96 @@ class DateInfo(BaseModel):
     format_detected: Optional[str] = None
 
 
-class ProductInfo(BaseModel):
-    """Extracted product information from OCR."""
+class WeightInfo(BaseModel):
+    """Product weight/volume information."""
+    
+    value: float
+    unit: str
+    raw: Optional[str] = None
 
+
+class ManufacturerInfo(BaseModel):
+    """Manufacturer and distributor information."""
+    
+    name: Optional[str] = None
+    distributor: Optional[str] = None
+    address: Optional[str] = None
+    contact: Optional[List[str]] = None
+
+
+class BarcodeInfo(BaseModel):
+    """Barcode lookup information.
+    
+    Note: company and category fields will be populated by the Backend
+    service using external APIs (Open Food Facts, UPCitemdb).
+    The AI service only provides barcode origin detection via GS1 prefix.
+    """
+    
+    barcode: str
+    is_vietnamese: bool = False
+    company: Optional[str] = None
+    category: Optional[str] = None
+    prefix: Optional[str] = None
+    note: Optional[str] = None
+    country: Optional[str] = None  # Country of origin from GS1 prefix
+
+
+class CategoryInfo(BaseModel):
+    """Detected product category."""
+    
+    name: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    keywords_vi: Optional[List[str]] = None
+
+
+class ProductCodesInfo(BaseModel):
+    """Product identification codes."""
+    
+    sku: Optional[str] = None
+    batch: Optional[str] = None
+    msktvsty: Optional[str] = None
+
+
+class ProductInfo(BaseModel):
+    """Extracted product information from OCR - Enhanced for Vietnamese products."""
+
+    # Basic info
     name: Optional[str] = None
     brand: Optional[str] = None
     barcode: Optional[str] = None
+    barcode_info: Optional[BarcodeInfo] = None
+    
+    # Weight/Volume
     weight: Optional[str] = None
+    weight_info: Optional[WeightInfo] = None
+    
+    # Ingredients and composition
     ingredients: Optional[List[str]] = None
-    nutrition_facts: Optional[Dict[str, str]] = None
+    nutrition_facts: Optional[Dict[str, Any]] = None
+    
+    # Instructions
+    storage_instructions: Optional[str] = None
+    usage_instructions: Optional[str] = None
+    
+    # Manufacturer/Distributor
+    manufacturer: Optional[ManufacturerInfo] = None
+    origin: Optional[str] = None
+    
+    # Certifications and quality
+    certifications: Optional[List[str]] = None
+    quality_standards: Optional[List[str]] = None
+    
+    # Warnings and notes
+    warnings: Optional[List[str]] = None
+    
+    # Product codes
+    product_codes: Optional[ProductCodesInfo] = None
+    
+    # Shelf life
+    shelf_life_days: Optional[int] = None
+    
+    # Category detection
+    detected_category: Optional[CategoryInfo] = None
 
 
 class OcrRequest(ImageInput):

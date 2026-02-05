@@ -10,14 +10,19 @@ from app.core.config import settings
 from app.core.exceptions import ImageProcessingError, OCRExtractionError
 from app.core.logging import get_logger
 from app.models.ocr import (
+    BarcodeInfo,
+    CategoryInfo,
     DateInfo,
+    ManufacturerInfo,
     OcrRequest,
     OcrResponse,
     OCRLanguage,
     ProductInfo,
     TextRegion,
+    WeightInfo,
 )
 from app.models.common import BoundingBox
+from app.services.vietnamese_product import vn_product_service
 
 logger = get_logger(__name__)
 
@@ -270,6 +275,114 @@ class OCRService:
 
         return None
 
+    def _extract_product_name_and_brand(self, raw_text: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract product name and brand from OCR text.
+        
+        Uses heuristics to identify brand and product name from text lines.
+        Typically brand appears first or is all uppercase, product name follows.
+        """
+        if not raw_text.strip():
+            return None, None
+
+        lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
+        
+        # Filter out date-related lines
+        non_date_lines = []
+        date_keywords = ["hsd", "nsx", "exp", "mfg", "ngày", "tháng", "năm"]
+        for line in lines:
+            line_lower = line.lower()
+            if not any(kw in line_lower for kw in date_keywords):
+                # Also filter lines that are just numbers (likely barcodes or dates)
+                if not line.replace("/", "").replace("-", "").replace(".", "").isdigit():
+                    non_date_lines.append(line)
+
+        if not non_date_lines:
+            return None, None
+
+        # Common Vietnamese brand patterns (often all caps or well-known names)
+        known_brands = [
+            # Dairy
+            "th true milk", "vinamilk", "dutch lady", "nutifood", "mộc châu", "ba vì",
+            # Nestle products
+            "nestle", "nestlé", "milo", "nescafe", "nescafé", "maggi", "la vie",
+            # Beverages
+            "coca-cola", "coca cola", "pepsi", "7up", "fanta", "sprite", 
+            "aquafina", "dasani", "lavie", "trà xanh 0 độ", "c2", "sting",
+            "number one", "dr thanh", "tân hiệp phát", "trà thảo mộc",
+            # Masan Group
+            "chinsu", "nam ngư", "omachi", "kokomi", "tam thái tử", "heo cao bồi",
+            # Instant noodles
+            "acecook", "hảo hảo", "vifon", "miliket", "gấu đỏ",
+            # Food brands
+            "kinh đô", "bibica", "hữu nghị", "vissan", "cầu tre", "cholimex",
+            "aji-no-moto", "ajinomoto", "knorr", "bột canh", "hạt nêm",
+            # Snacks
+            "orion", "bánh pía", "bánh tráng", "oishi", "poca",
+            # Others
+            "unilever", "p&g", "colgate", "omo", "comfort", "sunlight",
+        ]
+
+        brand: Optional[str] = None
+        name: Optional[str] = None
+
+        # Try to find brand
+        for line in non_date_lines:
+            line_lower = line.lower()
+            for known_brand in known_brands:
+                if known_brand in line_lower:
+                    brand = line
+                    break
+            if brand:
+                break
+
+        # If brand not found in known list, check for all-caps line (often brand)
+        if not brand:
+            for line in non_date_lines:
+                # All caps and reasonable length suggests brand name
+                if line.isupper() and 3 <= len(line) <= 30:
+                    brand = line.title()  # Convert to title case
+                    break
+
+        # Product name is typically the longest descriptive line
+        name_candidates = [
+            line for line in non_date_lines 
+            if line != brand and len(line) > 5
+        ]
+        
+        if name_candidates:
+            # Prefer line with Vietnamese descriptive words
+            descriptive_keywords = [
+                # Dairy
+                "sữa", "sữa tươi", "sữa chua", "yaourt", "phô mai", "bơ", "kem",
+                # Beverages
+                "nước", "nước ngọt", "nước suối", "nước khoáng", "trà", "cà phê", 
+                "nước ép", "sinh tố", "nước tăng lực", "nước yến",
+                # Food
+                "bánh", "mì", "mì ăn liền", "phở", "bún", "miến", "gạo", "cháo",
+                # Meat & Seafood
+                "thịt", "thịt heo", "thịt bò", "thịt gà", "giò", "chả", "xúc xích",
+                "cá", "tôm", "mực", "cá viên", "chả cá",
+                # Vegetables & Fruits
+                "rau", "củ", "quả", "trái cây", "cam", "táo", "chuối", "xoài",
+                # Condiments
+                "nước mắm", "nước tương", "tương ớt", "tương cà", "dầu ăn",
+                "muối", "đường", "bột ngọt", "hạt nêm", "gia vị",
+                # Snacks
+                "snack", "kẹo", "bánh quy", "khô", "mứt", "hạt"
+            ]
+            
+            for candidate in name_candidates:
+                if any(kw in candidate.lower() for kw in descriptive_keywords):
+                    name = candidate
+                    break
+            
+            # Fallback to first non-brand line
+            if not name and name_candidates:
+                name = name_candidates[0]
+
+        return name, brand
+
     def extract(self, request: OcrRequest) -> OcrResponse:
         """
         Extract product information from image.
@@ -301,12 +414,108 @@ class OCRService:
 
         # Extract barcode
         barcode = None
+        barcode_info = None
         if request.extract_barcode:
             barcode = self._extract_barcode(image_bytes)
+            if barcode:
+                # Get barcode origin information (country detection)
+                # Note: Full product details are handled by Backend API
+                barcode_lookup = vn_product_service.lookup_barcode(barcode)
+                if barcode_lookup:
+                    barcode_info = BarcodeInfo(
+                        barcode=barcode,
+                        is_vietnamese=barcode_lookup.get("is_vietnamese", False),
+                        company=None,  # Will be populated by Backend API
+                        category=None,  # Will be populated by Backend API  
+                        prefix=barcode_lookup.get("gs1_prefix"),
+                        note=barcode_lookup.get("note"),
+                        country=barcode_lookup.get("country"),
+                    )
 
-        # Build product info
+        # Extract product name and brand from text
+        extracted_name, extracted_brand = self._extract_product_name_and_brand(raw_text)
+        
+        # If barcode lookup found company, use it as brand if not extracted
+        if barcode_info and barcode_info.company and not extracted_brand:
+            extracted_brand = barcode_info.company
+
+        # Extract detailed packaging information using Vietnamese Product Service
+        packaging_info = vn_product_service.extract_all_packaging_info(raw_text)
+        
+        # Build weight info
+        weight_info = None
+        weight_str = None
+        if packaging_info.get("weight"):
+            w = packaging_info["weight"]
+            weight_info = WeightInfo(
+                value=w["value"],
+                unit=w["unit"],
+                raw=w.get("raw"),
+            )
+            weight_str = f"{w['value']} {w['unit']}"
+        
+        # Build manufacturer info (enhanced with distributor and contact)
+        manufacturer_info = None
+        if packaging_info.get("manufacturer"):
+            m = packaging_info["manufacturer"]
+            manufacturer_info = ManufacturerInfo(
+                name=m.get("name"),
+                distributor=m.get("distributor"),
+                address=m.get("address"),
+                contact=m.get("contact"),
+            )
+        
+        # Build category info
+        category_info = None
+        if packaging_info.get("detected_category"):
+            c = packaging_info["detected_category"]
+            category_info = CategoryInfo(
+                name=c["name"],
+                confidence=c["confidence"],
+                keywords_vi=c.get("keywords_vi"),
+            )
+        
+        # Build product codes info
+        from app.models.ocr import ProductCodesInfo
+        product_codes_info = None
+        if packaging_info.get("product_codes"):
+            pc = packaging_info["product_codes"]
+            product_codes_info = ProductCodesInfo(
+                sku=pc.get("sku"),
+                batch=pc.get("batch"),
+                msktvsty=pc.get("msktvsty"),
+            )
+
+        # Build product info with all enhanced fields
         product_info = ProductInfo(
+            # Basic info
+            name=extracted_name,
+            brand=extracted_brand,
             barcode=barcode,
+            barcode_info=barcode_info,
+            # Weight
+            weight=weight_str,
+            weight_info=weight_info,
+            # Ingredients and nutrition
+            ingredients=packaging_info.get("ingredients"),
+            nutrition_facts=packaging_info.get("nutrition") or None,
+            # Instructions
+            storage_instructions=packaging_info.get("storage"),
+            usage_instructions=packaging_info.get("usage"),  # From vietnamese_product.extract_usage_instructions
+            # Manufacturer/Distributor
+            manufacturer=manufacturer_info,
+            origin=packaging_info.get("origin"),
+            # Certifications and quality
+            certifications=packaging_info.get("certifications") or None,
+            quality_standards=packaging_info.get("quality_standards") or None,
+            # Warnings
+            warnings=packaging_info.get("warnings") or None,
+            # Product codes
+            product_codes=product_codes_info,
+            # Shelf life
+            shelf_life_days=packaging_info.get("shelf_life_days"),
+            # Category
+            detected_category=category_info,
         )
 
         # Calculate overall confidence
@@ -317,6 +526,8 @@ class OCRService:
             confidences.append(mfg_date.confidence)
         if text_regions:
             confidences.extend([r.confidence for r in text_regions])
+        if category_info:
+            confidences.append(category_info.confidence)
 
         overall_confidence = sum(confidences) / len(confidences) if confidences else 0.0
 

@@ -91,6 +91,33 @@ class PricingRequest(BaseModel):
         default=PricingStrategy.BALANCED,
         description="Pricing strategy to apply",
     )
+    
+    # Market price fields (for benchmarking)
+    min_market_price: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Giá thấp nhất thị trường (VNĐ)",
+    )
+    avg_market_price: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Giá trung bình thị trường (VNĐ)",
+    )
+    market_price_source: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Nguồn giá thị trường (bachhoaxanh, winmart, google, manual)",
+    )
+    product_name: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Tên sản phẩm (để tìm giá thị trường)",
+    )
+    barcode: Optional[str] = Field(
+        default=None,
+        max_length=20,
+        description="Mã barcode sản phẩm",
+    )
 
     @model_validator(mode="after")
     def validate_dates(self) -> "PricingRequest":
@@ -137,6 +164,30 @@ class PricingResponse(BaseModel):
     )
     max_suggested_price: float = Field(
         description="Maximum recommended price",
+    )
+    
+    # New fields for better insights
+    expected_sell_rate: float = Field(
+        ge=0,
+        le=100,
+        description="Khả năng bán được ở mức giá này (%)",
+    )
+    estimated_time_to_sell: str = Field(
+        description="Thời gian ước tính để bán hết",
+    )
+    competitiveness: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Mức cạnh tranh thị trường (0 → 1)",
+    )
+    reasons: List[str] = Field(
+        description="Các lý do AI đưa ra mức giá này",
+    )
+    
+    # Market price comparison
+    market_price_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Thông tin giá thị trường tham chiếu",
     )
 
     # Explanation
