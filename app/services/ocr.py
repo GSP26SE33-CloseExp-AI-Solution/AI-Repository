@@ -23,6 +23,8 @@ from app.models.ocr import (
 )
 from app.models.common import BoundingBox
 from app.services.vietnamese_product import vn_product_service
+from app.services.text_postprocessor import text_postprocessor
+from app.services.region_based_extractor import region_extractor
 
 logger = get_logger(__name__)
 
@@ -406,6 +408,24 @@ class OCRService:
 
         if not raw_text.strip():
             warnings.append("No text detected in image")
+            
+        # Apply region-based filtering and extraction for better accuracy
+        region_based_info = None
+        if text_regions:
+            try:
+                # Convert text_regions to dict format for region_extractor
+                regions_data = [
+                    {
+                        "text": r.text,
+                        "confidence": r.confidence,
+                        "bbox": r.bbox.dict() if r.bbox else None
+                    }
+                    for r in text_regions
+                ]
+                region_based_info = region_extractor.extract_from_regions(regions_data, raw_text)
+                logger.debug(f"Region-based extraction: {region_based_info}")
+            except Exception as e:
+                logger.warning(f"Region-based extraction failed: {e}")
 
         # Extract dates
         expiry_date, mfg_date = None, None
@@ -434,6 +454,25 @@ class OCRService:
 
         # Extract product name and brand from text
         extracted_name, extracted_brand = self._extract_product_name_and_brand(raw_text)
+        
+        # Enhance with region-based extraction results (higher confidence)
+        if region_based_info:
+            # Use region-based name if available and better
+            if region_based_info.name and (
+                not extracted_name or 
+                len(region_based_info.name) > len(extracted_name) or
+                region_based_info.name_confidence > 0.7
+            ):
+                extracted_name = region_based_info.name
+                logger.debug(f"Using region-based name: {extracted_name}")
+            
+            # Use region-based brand if available
+            if region_based_info.brand and (
+                not extracted_brand or 
+                region_based_info.brand_confidence > 0.8
+            ):
+                extracted_brand = region_based_info.brand
+                logger.debug(f"Using region-based brand: {extracted_brand}")
         
         # If barcode lookup found company, use it as brand if not extracted
         if barcode_info and barcode_info.company and not extracted_brand:
@@ -475,6 +514,45 @@ class OCRService:
                 keywords_vi=c.get("keywords_vi"),
             )
         
+        # Override with region-based category if higher confidence
+        if region_based_info and region_based_info.detected_category:
+            region_category = region_based_info.detected_category
+            if not category_info or region_category.get("confidence", 0) > category_info.confidence:
+                category_info = CategoryInfo(
+                    name=region_category.get("name", ""),
+                    confidence=region_category.get("confidence", 0.0),
+                    keywords_vi=region_category.get("keywords_vi"),
+                )
+                logger.debug(f"Using region-based category: {category_info.name}")
+        
+        # Merge ingredients from region-based extraction
+        merged_ingredients = packaging_info.get("ingredients")
+        if region_based_info and region_based_info.ingredients:
+            if not merged_ingredients or len(region_based_info.ingredients) > len(merged_ingredients):
+                merged_ingredients = region_based_info.ingredients
+                logger.debug(f"Using region-based ingredients")
+        
+        # Merge storage instructions
+        merged_storage = packaging_info.get("storage")
+        if region_based_info and region_based_info.storage_instructions:
+            if not merged_storage or len(region_based_info.storage_instructions) > len(merged_storage):
+                merged_storage = region_based_info.storage_instructions
+                logger.debug(f"Using region-based storage instructions")
+        
+        # Merge usage instructions
+        merged_usage = packaging_info.get("usage")
+        if region_based_info and region_based_info.usage_instructions:
+            if not merged_usage:
+                merged_usage = region_based_info.usage_instructions
+                logger.debug(f"Using region-based usage instructions")
+        
+        # Merge warnings
+        merged_warnings = packaging_info.get("warnings")
+        if region_based_info and region_based_info.warnings:
+            if not merged_warnings:
+                merged_warnings = region_based_info.warnings
+                logger.debug(f"Using region-based warnings")
+        
         # Build product codes info
         from app.models.ocr import ProductCodesInfo
         product_codes_info = None
@@ -496,20 +574,20 @@ class OCRService:
             # Weight
             weight=weight_str,
             weight_info=weight_info,
-            # Ingredients and nutrition
-            ingredients=packaging_info.get("ingredients"),
+            # Ingredients and nutrition (use merged from region-based extraction)
+            ingredients=merged_ingredients,
             nutrition_facts=packaging_info.get("nutrition") or None,
-            # Instructions
-            storage_instructions=packaging_info.get("storage"),
-            usage_instructions=packaging_info.get("usage"),  # From vietnamese_product.extract_usage_instructions
+            # Instructions (use merged from region-based extraction)
+            storage_instructions=merged_storage,
+            usage_instructions=merged_usage,
             # Manufacturer/Distributor
             manufacturer=manufacturer_info,
             origin=packaging_info.get("origin"),
             # Certifications and quality
             certifications=packaging_info.get("certifications") or None,
             quality_standards=packaging_info.get("quality_standards") or None,
-            # Warnings
-            warnings=packaging_info.get("warnings") or None,
+            # Warnings (use merged from region-based extraction)
+            warnings=merged_warnings or None,
             # Product codes
             product_codes=product_codes_info,
             # Shelf life
@@ -533,7 +611,8 @@ class OCRService:
 
         processing_time = (time.perf_counter() - start_time) * 1000
 
-        return OcrResponse(
+        # Build initial response
+        initial_response = OcrResponse(
             expiry_date=expiry_date,
             manufactured_date=mfg_date,
             product_info=product_info,
@@ -543,6 +622,64 @@ class OCRService:
             confidence=overall_confidence,
             processing_time_ms=round(processing_time, 2),
             warnings=warnings if warnings else None,
+        )
+
+        # Apply Vietnamese text post-processing to clean up and validate fields
+        try:
+            response_dict = initial_response.dict()
+            processed_dict = text_postprocessor.process_ocr_response(response_dict)
+            
+            # Rebuild response with processed data
+            processed_product_info = processed_dict.get("product_info", {})
+            
+            # Rebuild ProductInfo with corrected data
+            corrected_product_info = ProductInfo(
+                name=processed_product_info.get("name"),
+                brand=processed_product_info.get("brand"),
+                barcode=processed_product_info.get("barcode"),
+                barcode_info=product_info.barcode_info,  # Keep original barcode info object
+                weight=processed_product_info.get("weight"),
+                weight_info=product_info.weight_info,  # Keep original weight info object
+                ingredients=processed_product_info.get("ingredients"),
+                nutrition_facts=processed_product_info.get("nutrition_facts"),
+                storage_instructions=processed_product_info.get("storage_instructions"),
+                usage_instructions=processed_product_info.get("usage_instructions"),
+                manufacturer=product_info.manufacturer,  # Keep original manufacturer object
+                origin=processed_product_info.get("origin"),
+                certifications=processed_product_info.get("certifications"),
+                quality_standards=processed_product_info.get("quality_standards"),
+                warnings=processed_product_info.get("warnings"),
+                product_codes=product_info.product_codes,  # Keep original product codes object
+                shelf_life_days=processed_product_info.get("shelf_life_days"),
+                detected_category=self._rebuild_category_info(processed_product_info.get("detected_category")),
+            )
+            
+            # Return processed response
+            return OcrResponse(
+                expiry_date=expiry_date,
+                manufactured_date=mfg_date,
+                product_info=corrected_product_info,
+                name=corrected_product_info.name,  # Also set top-level name
+                brand=corrected_product_info.brand,  # Also set top-level brand
+                barcode=barcode,
+                raw_text=processed_dict.get("raw_text") if request.return_regions else None,
+                text_regions=text_regions if request.return_regions else None,
+                confidence=overall_confidence,
+                processing_time_ms=round(processing_time, 2),
+                warnings=warnings if warnings else None,
+            )
+        except Exception as e:
+            logger.warning(f"Post-processing failed, returning original response: {e}")
+            return initial_response
+
+    def _rebuild_category_info(self, category_dict: Optional[dict]) -> Optional[CategoryInfo]:
+        """Rebuild CategoryInfo from dictionary."""
+        if not category_dict:
+            return None
+        return CategoryInfo(
+            name=category_dict.get("name", ""),
+            confidence=category_dict.get("confidence", 0.0),
+            keywords_vi=category_dict.get("keywords_vi"),
         )
 
 
