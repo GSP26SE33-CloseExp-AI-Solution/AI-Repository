@@ -65,7 +65,6 @@ async def info() -> Dict[str, Any]:
         "endpoints": {
             "ocr": "/v1/ocr/extract",
             "pricing": "/v1/pricing/suggest",
-            "vision": "/v1/vision/analyze",
         },
         "docs": "/docs" if settings.environment != "production" else None,
     }

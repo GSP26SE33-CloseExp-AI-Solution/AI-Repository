@@ -143,37 +143,6 @@ def test_backend_pricing():
         return False
 
 
-def test_vision_direct():
-    """Test vision detection directly on AI Service"""
-    print("\n" + "="*50)
-    print("Testing Vision Detection (Direct to AI Service)...")
-    print("="*50)
-    
-    payload = {
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png",
-        "min_confidence": 0.25,
-        "return_annotated_image": False
-    }
-    
-    try:
-        response = requests.post(
-            f"{AI_SERVICE_URL}/api/v1/vision/detect",
-            json=payload,
-            headers=HEADERS,
-            timeout=30
-        )
-        print(f"Status Code: {response.status_code}")
-        # Don't print full response as it may contain base64 image
-        data = response.json()
-        if "annotated_image_b64" in data:
-            data["annotated_image_b64"] = "[BASE64_IMAGE_TRUNCATED]"
-        print(f"Response: {json.dumps(data, indent=2, default=str)}")
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return False
-
-
 def run_all_tests():
     """Run all integration tests"""
     print("\n" + "#"*60)
@@ -199,9 +168,6 @@ def run_all_tests():
     
     # Test 5: Backend Pricing
     results["Backend Pricing"] = test_backend_pricing()
-    
-    # Test 6: Vision Direct
-    results["Vision Direct"] = test_vision_direct()
     
     # Summary
     print("\n" + "="*60)

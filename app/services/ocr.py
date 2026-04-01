@@ -25,6 +25,7 @@ from app.models.common import BoundingBox
 from app.services.vietnamese_product import vn_product_service
 from app.services.text_postprocessor import text_postprocessor
 from app.services.region_based_extractor import region_extractor
+from app.services.llm_postprocessor import llm_postprocessor
 
 logger = get_logger(__name__)
 
@@ -385,7 +386,7 @@ class OCRService:
 
         return name, brand
 
-    def extract(self, request: OcrRequest) -> OcrResponse:
+    async def extract(self, request: OcrRequest) -> OcrResponse:
         """
         Extract product information from image.
         
@@ -624,10 +625,22 @@ class OCRService:
             warnings=warnings if warnings else None,
         )
 
-        # Apply Vietnamese text post-processing to clean up and validate fields
+        # Apply post-processing: LLM (primary) → rule-based (fallback)
         try:
             response_dict = initial_response.dict()
-            processed_dict = text_postprocessor.process_ocr_response(response_dict)
+
+            # --- Phase 1: LLM Post-processing (Gemini) ---
+            if llm_postprocessor.is_available:
+                try:
+                    processed_dict = await llm_postprocessor.process_ocr_response(response_dict)
+                    logger.info("LLM post-processing applied successfully")
+                except Exception as llm_err:
+                    logger.warning(f"LLM post-processing failed, falling back to rule-based: {llm_err}")
+                    processed_dict = text_postprocessor.process_ocr_response(response_dict)
+            else:
+                # Fallback: rule-based post-processing
+                logger.info("LLM not available, using rule-based post-processing")
+                processed_dict = text_postprocessor.process_ocr_response(response_dict)
             
             # Rebuild response with processed data
             processed_product_info = processed_dict.get("product_info", {})
@@ -687,6 +700,6 @@ class OCRService:
 ocr_service = OCRService()
 
 
-def extract_product_fields(request: OcrRequest) -> OcrResponse:
+async def extract_product_fields(request: OcrRequest) -> OcrResponse:
     """Extract product fields from image (backward compatible function)."""
-    return ocr_service.extract(request)
+    return await ocr_service.extract(request)

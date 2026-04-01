@@ -69,7 +69,7 @@ async def extract(
     validate_image_request(request)
 
     try:
-        return extract_product_fields(request)
+        return await extract_product_fields(request)
     except ImageProcessingError as e:
         raise HTTPException(status_code=400, detail=e.message) from e
     except OCRExtractionError as e:

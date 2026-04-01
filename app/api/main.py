@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import health, ocr, pricing, vision, fresh_produce
+from app.api import health, ocr, pricing
 from app.core.config import settings
 from app.core.exceptions import AIServiceError
 from app.core.logging import get_logger, setup_logging
@@ -100,9 +100,6 @@ def create_app() -> FastAPI:
     app.include_router(health.router, tags=["Health"])
     app.include_router(ocr.router, prefix="/v1/ocr", tags=["OCR"])
     app.include_router(pricing.router, prefix="/v1/pricing", tags=["Pricing"])
-    app.include_router(vision.router, prefix="/v1/vision", tags=["Vision"])
-    app.include_router(fresh_produce.router, prefix="/v1/fresh-produce", tags=["Fresh Produce"])
-
     return app
 
 

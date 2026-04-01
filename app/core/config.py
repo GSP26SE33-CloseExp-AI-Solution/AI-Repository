@@ -47,6 +47,10 @@ class Settings(BaseModel):
         default=["image/jpeg", "image/png", "image/webp"]
     )
 
+    # Gemini LLM (Phase 1: API, Phase 2: fine-tuned GGUF)
+    gemini_api_key: Optional[str] = Field(default=None)
+    gemini_model: str = Field(default="gemini-3.1-flash-lite-preview")
+
     # Cache
     cache_ttl_seconds: int = Field(default=3600)
     enable_cache: bool = Field(default=True)
@@ -90,6 +94,8 @@ def get_settings() -> Settings:
         api_key=os.getenv("AI_API_KEY"),
         yolo_model_path=os.getenv("AI_YOLO_MODEL_PATH", "yolo11n.pt"),
         ocr_model_path=os.getenv("AI_OCR_MODEL_PATH"),
+        gemini_api_key=os.getenv("AI_GEMINI_API_KEY"),
+        gemini_model=os.getenv("AI_GEMINI_MODEL", "gemini-3.1-flash-lite-preview"),
         log_level=os.getenv("AI_LOG_LEVEL", "INFO"),
     )
 
