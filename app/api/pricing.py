@@ -6,6 +6,7 @@ from app.api.deps import get_api_key
 from app.models.pricing import PricingRequest, PricingResponse
 from app.services.pricing import suggest_price
 from app.services.market_price_crawler import MarketPriceCrawlerService
+from app.services.pricing_market_enrichment import enrich_pricing_request_with_market_crawl
 
 router = APIRouter()
 
@@ -30,12 +31,13 @@ async def suggest(
     - Product category
     - Demand index
     - Competitor pricing
-    - Market price benchmarking
+    - Market price benchmarking (optionally auto-filled via crawler when min market price is missing)
     - Pricing strategy
     
     Returns suggested price with confidence score and rationale.
     """
-    return suggest_price(payload)
+    enriched = await enrich_pricing_request_with_market_crawl(payload)
+    return suggest_price(enriched)
 
 
 # ============= Market Price Crawling =============

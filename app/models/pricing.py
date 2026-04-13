@@ -118,6 +118,17 @@ class PricingRequest(BaseModel):
         max_length=20,
         description="Mã barcode sản phẩm",
     )
+    freshness_level: Optional[str] = Field(
+        default=None,
+        max_length=50,
+        description="Mức độ tươi/chất lượng (fresh, acceptable, declining, spoiled)",
+    )
+    freshness_score: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Điểm chất lượng 0–1 từ pipeline thị giác/OCR",
+    )
 
     @model_validator(mode="after")
     def validate_dates(self) -> "PricingRequest":

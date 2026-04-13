@@ -172,6 +172,14 @@ class OcrResponse(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     processing_time_ms: Optional[float] = None
     warnings: Optional[List[str]] = None
+    yolo_roi_applied: Optional[bool] = Field(
+        default=None,
+        description="Whether YOLO-based crop was applied before OCR",
+    )
+    yolo_roi_note: Optional[str] = Field(
+        default=None,
+        description="Short note on YOLO ROI (e.g. skipped reason)",
+    )
 
     @field_validator("confidence", mode="before")
     @classmethod

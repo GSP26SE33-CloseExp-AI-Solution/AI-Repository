@@ -237,6 +237,46 @@ class PricingService:
         
         return adjusted_price, comparison_info
 
+    def _apply_freshness_adjustment(
+        self,
+        suggested_price: float,
+        base_price: float,
+        request: PricingRequest,
+    ) -> tuple[float, Optional[str]]:
+        """
+        Nudge suggested price using freshness_level / freshness_score from vision/OCR pipeline.
+        """
+        level = (request.freshness_level or "").strip().lower()
+        score = request.freshness_score
+
+        if not level and score is None:
+            return suggested_price, None
+
+        mult = 1.0
+        if level:
+            table = {
+                "fresh": 1.02,
+                "acceptable": 1.0,
+                "declining": 0.93,
+                "spoiled": 0.85,
+            }
+            mult = table.get(level, 1.0)
+        elif score is not None:
+            s = max(0.0, min(1.0, score))
+            mult = 0.90 + 0.20 * s
+
+        adjusted = suggested_price * mult
+        floor = base_price * self.min_decay
+        adjusted = max(floor, adjusted)
+        if abs(adjusted - suggested_price) < 1.0:
+            return suggested_price, None
+        note = f"mult={mult:.3f}"
+        if level:
+            note = f"level={level};{note}"
+        if score is not None:
+            note = f"{note};score={score:.2f}"
+        return adjusted, note
+
     def _get_urgency_level(self, days_to_expire: int) -> str:
         """Determine urgency level based on days to expiry."""
         if days_to_expire <= 1:
@@ -383,6 +423,28 @@ class PricingService:
             reasons.append(f"Sản phẩm còn {request.days_to_expire} ngày đến hạn sử dụng")
         else:
             reasons.append(f"Sản phẩm còn {request.days_to_expire} ngày hạn sử dụng")
+
+        src = request.market_price_source or ""
+        if src.startswith("ai_auto_crawl"):
+            reasons.append(
+                "Giá thị trường tham chiếu được crawler AI bổ sung tự động theo barcode/tên sản phẩm."
+            )
+
+        if request.freshness_level:
+            fl = request.freshness_level.strip().lower()
+            freshness_lines = {
+                "fresh": "Đánh giá độ tươi: tốt — có thể giữ giá tương đối cao hơn một chút.",
+                "acceptable": "Đánh giá độ tươi: chấp nhận được — mức giảm giá cân bằng.",
+                "declining": "Đánh giá độ tươi: giảm — điều chỉnh giá thấp hơn để dễ bán.",
+                "spoiled": "Đánh giá độ tươi: kém — ưu tiên xả hàng nhanh.",
+            }
+            line = freshness_lines.get(fl)
+            if line:
+                reasons.append(line)
+        elif request.freshness_score is not None:
+            reasons.append(
+                f"Điểm chất lượng (freshness_score={request.freshness_score:.2f}) dùng để tinh chỉnh giá."
+            )
         
         # Reason 2: Market price comparison (QUAN TRỌNG)
         if market_comparison and market_comparison.get("has_market_data"):
@@ -590,13 +652,20 @@ class PricingService:
                     request.avg_market_price,
                     request.days_to_expire,
                 )
-                # Recalculate discount after market adjustment
-                discount_percent = (1 - (suggested / request.base_price)) * 100
-                
                 # Increase confidence if market data available
                 confidence = min(1.0, confidence + 0.1)
-            
-            # Recalculate price range after market adjustment
+
+            # Step 7.5: Freshness / perceived quality (from BE / vision pipeline)
+            suggested, freshness_note = self._apply_freshness_adjustment(
+                suggested,
+                request.base_price,
+                request,
+            )
+            if freshness_note is not None:
+                rationale["freshness_adjustment"] = freshness_note
+
+            # Discount and bands after market + freshness
+            discount_percent = (1 - (suggested / request.base_price)) * 100
             min_price = suggested * 0.9
             max_price = suggested * 1.1
             min_price = max(min_price, absolute_min)
@@ -663,7 +732,7 @@ class PricingService:
                     request.product_type,
                 ),
                 calculation_time_ms=round(calculation_time, 2),
-                model_version="1.2.0",
+                model_version="1.3.0",
             )
 
         except Exception as e:

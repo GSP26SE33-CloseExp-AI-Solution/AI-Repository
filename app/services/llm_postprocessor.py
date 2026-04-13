@@ -1,12 +1,10 @@
 """
 LLM-based OCR Post-processor.
 
-Replaces the rule-based text_postprocessor with a Gemini LLM call
-that understands Vietnamese context, fixes OCR errors, and classifies
-product fields in a single pass.
+Fallback order: local GGUF (llama.cpp) → Gemini API → rule-based (text_postprocessor).
 
-Phase 1: Use Gemini API for post-processing.
-Phase 2: Collect data for fine-tuning a smaller GGUF model.
+Phase 1: Gemini + optional local GGUF.
+Phase 2: Collect pairs under data/ocr_corrections/ for fine-tuning / distillation.
 """
 
 from __future__ import annotations
@@ -22,6 +20,8 @@ import httpx
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.services import local_gguf_llm
+from app.services.text_postprocessor import text_postprocessor
 
 logger = get_logger(__name__)
 
@@ -89,13 +89,16 @@ def _save_training_pair(
     regions: List[Dict[str, Any]],
     llm_output: Dict[str, Any],
     processing_time_ms: float,
+    *,
+    backend: str,
+    model_label: str,
 ) -> None:
     """
     Save (input, output) pair for future fine-tuning.
     
     Each record is a JSONL line with:
     - input: raw OCR text + regions
-    - output: corrected structured JSON from LLM
+    - output: corrected structured JSON (from LLM or rule-based snapshot)
     - metadata: timestamp, processing time, model used
     """
     try:
@@ -110,7 +113,8 @@ def _save_training_pair(
             "output": llm_output,
             "metadata": {
                 "processing_time_ms": processing_time_ms,
-                "model": settings.gemini_model,
+                "backend": backend,
+                "model": model_label,
             },
         }
         
@@ -121,7 +125,7 @@ def _save_training_pair(
         with open(file_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         
-        logger.debug(f"Saved training pair to {file_path}")
+        logger.info("Saved OCR correction sample to %s (backend=%s)", file_path, backend)
     except Exception as e:
         logger.warning(f"Failed to save training pair: {e}")
 
@@ -227,15 +231,7 @@ _gemini_client = GeminiClient()
 
 class LLMPostProcessor:
     """
-    Uses Gemini LLM to post-process OCR results.
-    
-    Replaces rule-based text_postprocessor with a single LLM call that:
-    1. Fixes Vietnamese spelling errors
-    2. Removes noise/garbage text
-    3. Classifies text into structured product fields
-    4. Detects product category
-    
-    Falls back to rule-based processor if LLM is unavailable.
+    Post-process OCR: local GGUF → Gemini → rule-based (text_postprocessor).
     """
     
     def __init__(self) -> None:
@@ -243,66 +239,192 @@ class LLMPostProcessor:
     
     @property
     def is_available(self) -> bool:
-        """Check if LLM post-processing is available."""
-        return self.gemini.is_available
+        """True when any path can run (always True: rule-based is the final fallback)."""
+        return True
+    
+    def _regions_snapshot(self, text_regions: Any) -> List[Dict[str, Any]]:
+        regions_data: List[Dict[str, Any]] = []
+        for r in text_regions or []:
+            if isinstance(r, dict):
+                regions_data.append(r)
+            else:
+                regions_data.append(
+                    {"text": getattr(r, "text", ""), "confidence": getattr(r, "confidence", 0)}
+                )
+        return regions_data
+
+    async def _try_llm_backends(
+        self,
+        ocr_data: Dict[str, Any],
+        user_prompt: str,
+        raw_text: str,
+        regions_data: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Try local GGUF then Gemini. On success, save training pair and return merged dict.
+        """
+        if local_gguf_llm.local_gguf_configured():
+            start = time.perf_counter()
+            try:
+                raw_local = await local_gguf_llm.generate(SYSTEM_PROMPT, user_prompt)
+            except Exception as e:
+                logger.warning("Local GGUF call failed: %s", e)
+                raw_local = None
+            llm_time_ms = (time.perf_counter() - start) * 1000
+            if raw_local:
+                llm_result = self._parse_llm_response(raw_local)
+                if llm_result:
+                    path = getattr(settings, "llm_gguf_path", "") or ""
+                    model_label = Path(str(path)).name if path else "local_gguf"
+                    logger.info("LLM post-processing (local GGUF) in %.0fms", llm_time_ms)
+                    _save_training_pair(
+                        raw_text,
+                        regions_data,
+                        llm_result,
+                        llm_time_ms,
+                        backend="local_gguf",
+                        model_label=model_label,
+                    )
+                    return self._merge_results(ocr_data, llm_result, llm_time_ms)
+                logger.warning("Local GGUF returned unparseable JSON; trying Gemini")
+            else:
+                logger.warning("Local GGUF empty response; trying Gemini")
+
+        if self.gemini.is_available:
+            start = time.perf_counter()
+            raw_cloud = await self.gemini.generate(SYSTEM_PROMPT, user_prompt)
+            llm_time_ms = (time.perf_counter() - start) * 1000
+            if raw_cloud:
+                llm_result = self._parse_llm_response(raw_cloud)
+                if llm_result:
+                    logger.info("LLM post-processing (Gemini) in %.0fms", llm_time_ms)
+                    _save_training_pair(
+                        raw_text,
+                        regions_data,
+                        llm_result,
+                        llm_time_ms,
+                        backend="gemini",
+                        model_label=settings.gemini_model,
+                    )
+                    return self._merge_results(ocr_data, llm_result, llm_time_ms)
+                logger.warning("Gemini returned unparseable JSON")
+            else:
+                logger.warning("Gemini returned empty response")
+
+        reasons: List[str] = []
+        if local_gguf_llm.local_gguf_configured():
+            reasons.append("local GGUF did not return parseable JSON (see warnings above)")
+        else:
+            raw_p = getattr(settings, "llm_gguf_path", None)
+            if raw_p and str(raw_p).strip():
+                reasons.append(f"local GGUF path invalid or file missing ({raw_p})")
+            else:
+                reasons.append("local GGUF not configured (AI_LLM_GGUF_PATH)")
+        if self.gemini.is_available:
+            reasons.append("Gemini did not return parseable JSON or returned empty (see warnings above)")
+        else:
+            reasons.append("Gemini not configured (AI_GEMINI_API_KEY or GEMINI_API_KEY)")
+        logger.warning("LLM OCR post-process skipped: %s", " | ".join(reasons))
+
+        return None
     
     async def process_ocr_response(
         self,
         ocr_data: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Post-process OCR response using Gemini LLM.
-        
-        Args:
-            ocr_data: Original OCR response dict (from initial_response.dict())
-            
-        Returns:
-            Enhanced OCR response dict with corrected product_info
+        Post-process OCR: local GGUF → Gemini → rule-based.
         """
-        if not self.is_available:
-            logger.info("LLM not available, skipping LLM post-processing")
-            return ocr_data
-        
         raw_text = ocr_data.get("raw_text", "")
-        product_info = ocr_data.get("product_info") or {}
         text_regions = ocr_data.get("text_regions") or []
         
         if not raw_text and not text_regions:
             return ocr_data
         
-        # Build prompt
         user_prompt = self._build_prompt(ocr_data)
-        
-        # Call LLM
-        start = time.perf_counter()
-        raw_response = await self.gemini.generate(SYSTEM_PROMPT, user_prompt)
-        llm_time_ms = (time.perf_counter() - start) * 1000
-        
-        if not raw_response:
-            logger.warning("LLM returned empty response")
-            return ocr_data
-        
-        # Parse LLM JSON output
-        llm_result = self._parse_llm_response(raw_response)
-        if not llm_result:
-            logger.warning("Failed to parse LLM response")
-            return ocr_data
-        
-        logger.info(f"LLM post-processing completed in {llm_time_ms:.0f}ms")
-        
-        # Save training pair for Phase 2
-        regions_data = []
-        for r in text_regions:
-            if isinstance(r, dict):
-                regions_data.append(r)
-            else:
-                regions_data.append({"text": getattr(r, "text", ""), "confidence": getattr(r, "confidence", 0)})
-        
-        _save_training_pair(raw_text, regions_data, llm_result, llm_time_ms)
-        
-        # Merge LLM results into ocr_data
-        enhanced = self._merge_results(ocr_data, llm_result, llm_time_ms)
-        return enhanced
+        regions_data = self._regions_snapshot(text_regions)
+
+        merged = await self._try_llm_backends(ocr_data, user_prompt, raw_text, regions_data)
+        if merged is not None:
+            return merged
+
+        logger.info("Using rule-based OCR post-processing (LLM backends unavailable or failed)")
+        start_rb = time.perf_counter()
+        rule_out = text_postprocessor.process_ocr_response(ocr_data)
+        rb_ms = (time.perf_counter() - start_rb) * 1000
+        training_snapshot = self._training_snapshot_from_response(rule_out)
+        _save_training_pair(
+            raw_text,
+            regions_data,
+            training_snapshot,
+            rb_ms,
+            backend="rule_based",
+            model_label="text_postprocessor",
+        )
+        return rule_out
+
+    @staticmethod
+    def _training_snapshot_from_response(ocr_response_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Build a JSON object aligned with the LLM schema keys for JSONL export,
+        from a post-processed OCR dict (e.g. rule-based output).
+        """
+        pi = ocr_response_dict.get("product_info") or {}
+
+        def _list_to_str(val: Any) -> Optional[str]:
+            if val is None:
+                return None
+            if isinstance(val, list):
+                parts = [str(x).strip() for x in val if str(x).strip()]
+                return ", ".join(parts) if parts else None
+            s = str(val).strip()
+            return s or None
+
+        ingredients = pi.get("ingredients")
+        if isinstance(ingredients, list):
+            ingredients_str = _list_to_str(ingredients)
+        else:
+            ingredients_str = (str(ingredients).strip() if ingredients else None) or None
+
+        dc = pi.get("detected_category")
+        category: Optional[str] = None
+        if isinstance(dc, dict):
+            category = dc.get("name")
+
+        man = pi.get("manufacturer")
+        manufacturer_str: Optional[str] = None
+        if isinstance(man, dict):
+            manufacturer_str = man.get("name")
+        elif man:
+            manufacturer_str = str(man).strip() or None
+
+        qs = pi.get("quality_standards")
+        quality_str = _list_to_str(qs) if isinstance(qs, list) else (
+            str(qs).strip() if qs else None
+        )
+
+        warnings_val = pi.get("warnings")
+        if isinstance(warnings_val, list):
+            warnings_str = _list_to_str(warnings_val)
+        else:
+            warnings_str = (str(warnings_val).strip() if warnings_val else None) or None
+
+        weight_str = pi.get("weight") or pi.get("net_weight")
+        if weight_str is not None:
+            weight_str = str(weight_str).strip() or None
+
+        return {
+            "name": pi.get("name"),
+            "brand": pi.get("brand"),
+            "ingredients": ingredients_str,
+            "storage_instructions": pi.get("storage_instructions"),
+            "usage_instructions": pi.get("usage_instructions"),
+            "warnings": warnings_str,
+            "weight": weight_str,
+            "manufacturer": manufacturer_str,
+            "category": category,
+            "quality_standards": quality_str,
+        }
     
     def _build_prompt(self, ocr_data: Dict[str, Any]) -> str:
         """Build the user prompt from OCR data."""

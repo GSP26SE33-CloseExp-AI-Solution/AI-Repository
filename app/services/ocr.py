@@ -419,7 +419,7 @@ class OCRService:
                     {
                         "text": r.text,
                         "confidence": r.confidence,
-                        "bbox": r.bbox.dict() if r.bbox else None
+                        "bounding_box": r.bounding_box.model_dump() if r.bounding_box else None,
                     }
                     for r in text_regions
                 ]
@@ -576,7 +576,7 @@ class OCRService:
             weight=weight_str,
             weight_info=weight_info,
             # Ingredients and nutrition (use merged from region-based extraction)
-            ingredients=merged_ingredients,
+            ingredients=self._normalize_string_list(merged_ingredients),
             nutrition_facts=packaging_info.get("nutrition") or None,
             # Instructions (use merged from region-based extraction)
             storage_instructions=merged_storage,
@@ -585,10 +585,10 @@ class OCRService:
             manufacturer=manufacturer_info,
             origin=packaging_info.get("origin"),
             # Certifications and quality
-            certifications=packaging_info.get("certifications") or None,
-            quality_standards=packaging_info.get("quality_standards") or None,
+            certifications=self._normalize_string_list(packaging_info.get("certifications")),
+            quality_standards=self._normalize_string_list(packaging_info.get("quality_standards")),
             # Warnings (use merged from region-based extraction)
-            warnings=merged_warnings or None,
+            warnings=self._normalize_string_list(merged_warnings),
             # Product codes
             product_codes=product_codes_info,
             # Shelf life
@@ -625,21 +625,21 @@ class OCRService:
             warnings=warnings if warnings else None,
         )
 
-        # Apply post-processing: LLM (primary) → rule-based (fallback)
+        # Post-processing: local GGUF → Gemini → rule-based (inside llm_postprocessor)
         try:
             response_dict = initial_response.dict()
-
-            # --- Phase 1: LLM Post-processing (Gemini) ---
-            if llm_postprocessor.is_available:
-                try:
-                    processed_dict = await llm_postprocessor.process_ocr_response(response_dict)
-                    logger.info("LLM post-processing applied successfully")
-                except Exception as llm_err:
-                    logger.warning(f"LLM post-processing failed, falling back to rule-based: {llm_err}")
-                    processed_dict = text_postprocessor.process_ocr_response(response_dict)
-            else:
-                # Fallback: rule-based post-processing
-                logger.info("LLM not available, using rule-based post-processing")
+            # Important: LLM post-processor (and JSONL data collection) needs raw OCR text
+            # and detected text regions. Backend callers may set `return_regions=false`
+            # to avoid returning these fields in the API response, but we still want
+            # them available for prompt building + training pair export.
+            response_dict["raw_text"] = raw_text
+            response_dict["text_regions"] = text_regions
+            try:
+                processed_dict = await llm_postprocessor.process_ocr_response(response_dict)
+            except Exception as llm_err:
+                logger.warning(
+                    "Post-processor raised, falling back to rule-based: %s", llm_err
+                )
                 processed_dict = text_postprocessor.process_ocr_response(response_dict)
             
             # Rebuild response with processed data
@@ -653,15 +653,15 @@ class OCRService:
                 barcode_info=product_info.barcode_info,  # Keep original barcode info object
                 weight=processed_product_info.get("weight"),
                 weight_info=product_info.weight_info,  # Keep original weight info object
-                ingredients=processed_product_info.get("ingredients"),
+                ingredients=self._normalize_string_list(processed_product_info.get("ingredients")),
                 nutrition_facts=processed_product_info.get("nutrition_facts"),
                 storage_instructions=processed_product_info.get("storage_instructions"),
                 usage_instructions=processed_product_info.get("usage_instructions"),
                 manufacturer=product_info.manufacturer,  # Keep original manufacturer object
                 origin=processed_product_info.get("origin"),
-                certifications=processed_product_info.get("certifications"),
-                quality_standards=processed_product_info.get("quality_standards"),
-                warnings=processed_product_info.get("warnings"),
+                certifications=self._normalize_string_list(processed_product_info.get("certifications")),
+                quality_standards=self._normalize_string_list(processed_product_info.get("quality_standards")),
+                warnings=self._normalize_string_list(processed_product_info.get("warnings")),
                 product_codes=product_info.product_codes,  # Keep original product codes object
                 shelf_life_days=processed_product_info.get("shelf_life_days"),
                 detected_category=self._rebuild_category_info(processed_product_info.get("detected_category")),
@@ -684,6 +684,23 @@ class OCRService:
         except Exception as e:
             logger.warning(f"Post-processing failed, returning original response: {e}")
             return initial_response
+
+    @staticmethod
+    def _normalize_string_list(value: Any) -> Optional[List[str]]:
+        """Normalize string/list fields into clean list[str] for ProductInfo."""
+        if value is None:
+            return None
+
+        if isinstance(value, list):
+            cleaned = [str(item).strip() for item in value if str(item).strip()]
+            return cleaned or None
+
+        if isinstance(value, str):
+            text = value.strip()
+            return [text] if text else None
+
+        text = str(value).strip()
+        return [text] if text else None
 
     def _rebuild_category_info(self, category_dict: Optional[dict]) -> Optional[CategoryInfo]:
         """Rebuild CategoryInfo from dictionary."""

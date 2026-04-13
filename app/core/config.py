@@ -47,9 +47,24 @@ class Settings(BaseModel):
         default=["image/jpeg", "image/png", "image/webp"]
     )
 
-    # Gemini LLM (Phase 1: API, Phase 2: fine-tuned GGUF)
+    # Gemini LLM (API fallback after local GGUF)
     gemini_api_key: Optional[str] = Field(default=None)
     gemini_model: str = Field(default="gemini-3.1-flash-lite-preview")
+
+    # Local GGUF (llama.cpp via llama-cpp-python) — Path A: Q4_0 / Gemma-class
+    llm_gguf_path: Optional[str] = Field(
+        default=None,
+        description="Absolute or relative path to .gguf (e.g. gemma-3-4b-it-Q4_0.gguf)",
+    )
+    llm_ctx_size: int = Field(default=8192, ge=512)
+    llm_gpu_layers: int = Field(default=0, ge=0)
+    llm_cpu_threads: Optional[int] = Field(default=None, ge=1)
+    llm_max_tokens: int = Field(default=2048, ge=64)
+    llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    llm_chat_format: Optional[str] = Field(
+        default=None,
+        description="Optional llama-cpp chat_format, e.g. gemma, gemma-2",
+    )
 
     # Cache
     cache_ttl_seconds: int = Field(default=3600)
@@ -96,6 +111,17 @@ def get_settings() -> Settings:
         ocr_model_path=os.getenv("AI_OCR_MODEL_PATH"),
         gemini_api_key=os.getenv("AI_GEMINI_API_KEY"),
         gemini_model=os.getenv("AI_GEMINI_MODEL", "gemini-3.1-flash-lite-preview"),
+        llm_gguf_path=os.getenv("AI_LLM_GGUF_PATH") or None,
+        llm_ctx_size=int(os.getenv("AI_LLM_CTX_SIZE", "8192")),
+        llm_gpu_layers=int(os.getenv("AI_LLM_GPU_LAYERS", "0")),
+        llm_cpu_threads=(
+            int(t)
+            if (t := os.getenv("AI_LLM_CPU_THREADS", "").strip())
+            else None
+        ),
+        llm_max_tokens=int(os.getenv("AI_LLM_MAX_TOKENS", "2048")),
+        llm_temperature=float(os.getenv("AI_LLM_TEMPERATURE", "0.1")),
+        llm_chat_format=os.getenv("AI_LLM_CHAT_FORMAT") or None,
         log_level=os.getenv("AI_LOG_LEVEL", "INFO"),
     )
 

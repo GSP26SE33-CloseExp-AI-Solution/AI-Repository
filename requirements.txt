@@ -9,6 +9,10 @@ python-dotenv
 requests
 httpx
 
+# Local LLM (OCR post-process GGUF via llama.cpp). CPU wheel by default.
+# GPU (CUDA): see https://github.com/abetlen/llama-cpp-python#installation-with-cuda
+llama-cpp-python
+
 # Image Processing
 Pillow
 opencv-python-headless
