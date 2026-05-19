@@ -1,12 +1,13 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
-from app.api.deps import get_api_key
+from app.api.deps import get_api_key, get_user_id
 from app.models.pricing import PricingRequest, PricingResponse
 from app.services.pricing import suggest_price
 from app.services.market_price_crawler import MarketPriceCrawlerService
 from app.services.pricing_market_enrichment import enrich_pricing_request_with_market_crawl
+from app.services.token_service import token_service
 
 router = APIRouter()
 
@@ -17,10 +18,14 @@ router = APIRouter()
     "/suggest",
     response_model=PricingResponse,
     summary="Suggest price for near-expiry product",
-    description="Calculate optimal price based on expiry date, product type and market factors",
+    description=(
+        "Calculate optimal price based on expiry date, product type and market factors. "
+        "Consumes **1 token** per request. Monthly budget: **150 tokens**."
+    ),
 )
 async def suggest(
     payload: PricingRequest,
+    user_id: str = Depends(get_user_id),
     _: str = Depends(get_api_key),
 ) -> PricingResponse:
     """
@@ -35,9 +40,48 @@ async def suggest(
     - Pricing strategy
     
     Returns suggested price with confidence score and rationale.
+    
+    **Token cost**: 1 token per call
     """
+    # Check token budget before calling AI
+    if not token_service.check_budget("pricing", user_id, 1):
+        usage = token_service.get_usage("pricing", user_id)
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "TOKEN_BUDGET_EXCEEDED",
+                "message": (
+                    f"Monthly Pricing token budget exceeded. "
+                    f"Budget: {usage['budget']}, Used: {usage['used']}, "
+                    f"Remaining: {usage['remaining']}. Resets next month."
+                ),
+                "token_usage": usage,
+            },
+        )
+
     enriched = await enrich_pricing_request_with_market_crawl(payload)
-    return suggest_price(enriched)
+    result = suggest_price(enriched)
+
+    # Consume token after successful result
+    token_service.consume("pricing", user_id, 1)
+    return result
+
+
+@router.get(
+    "/token-status",
+    summary="Get Pricing token usage for current month",
+    description="Quick access to Pricing token budget and remaining usage.",
+)
+async def get_pricing_token_status(
+    user_id: str = Depends(get_user_id),
+    _: str = Depends(get_api_key),
+):
+    """Get current month Pricing token usage."""
+    return {
+        "success": True,
+        "data": token_service.get_usage("pricing", user_id),
+    }
+
 
 
 # ============= Market Price Crawling =============

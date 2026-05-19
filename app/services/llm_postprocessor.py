@@ -263,7 +263,11 @@ class LLMPostProcessor:
         """
         Try local GGUF then Gemini. On success, save training pair and return merged dict.
         """
-        if local_gguf_llm.local_gguf_configured():
+        use_gguf = (
+            settings.llm_provider in {"auto", "gguf"}
+            and local_gguf_llm.local_gguf_configured()
+        )
+        if use_gguf:
             start = time.perf_counter()
             try:
                 raw_local = await local_gguf_llm.generate(SYSTEM_PROMPT, user_prompt)
@@ -290,7 +294,8 @@ class LLMPostProcessor:
             else:
                 logger.warning("Local GGUF empty response; trying Gemini")
 
-        if self.gemini.is_available:
+        use_gemini = settings.llm_provider in {"auto", "gemini"}
+        if use_gemini and self.gemini.is_available:
             start = time.perf_counter()
             raw_cloud = await self.gemini.generate(SYSTEM_PROMPT, user_prompt)
             llm_time_ms = (time.perf_counter() - start) * 1000
@@ -312,18 +317,23 @@ class LLMPostProcessor:
                 logger.warning("Gemini returned empty response")
 
         reasons: List[str] = []
-        if local_gguf_llm.local_gguf_configured():
+        if settings.llm_provider == "gguf" and not local_gguf_llm.local_gguf_configured():
+            reasons.append("AI_LLM_PROVIDER=gguf but no valid AI_LLM_GGUF_PATH")
+        elif use_gguf:
             reasons.append("local GGUF did not return parseable JSON (see warnings above)")
-        else:
+        elif settings.llm_provider == "gemini":
+            pass
+        elif local_gguf_llm.local_gguf_configured() is False:
             raw_p = getattr(settings, "llm_gguf_path", None)
             if raw_p and str(raw_p).strip():
                 reasons.append(f"local GGUF path invalid or file missing ({raw_p})")
             else:
                 reasons.append("local GGUF not configured (AI_LLM_GGUF_PATH)")
-        if self.gemini.is_available:
-            reasons.append("Gemini did not return parseable JSON or returned empty (see warnings above)")
-        else:
-            reasons.append("Gemini not configured (AI_GEMINI_API_KEY or GEMINI_API_KEY)")
+        if use_gemini:
+            if self.gemini.is_available:
+                reasons.append("Gemini did not return parseable JSON or returned empty (see warnings above)")
+            else:
+                reasons.append("Gemini not configured (AI_GEMINI_API_KEY or GEMINI_API_KEY)")
         logger.warning("LLM OCR post-process skipped: %s", " | ".join(reasons))
 
         return None

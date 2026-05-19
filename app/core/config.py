@@ -22,7 +22,10 @@ class Settings(BaseModel):
     # API Security
     api_key: Optional[str] = Field(default=None)
     api_key_header: str = Field(default="X-API-Key")
-    allowed_origins: List[str] = Field(default=["*"])
+    allowed_origins: List[str] = Field(default_factory=list)
+
+    # LLM provider: auto (GGUF if configured, else Gemini) | gemini | gguf
+    llm_provider: str = Field(default="auto")
 
     # Model paths
     yolo_model_path: str = Field(default="yolo11n.pt")
@@ -40,6 +43,8 @@ class Settings(BaseModel):
     pricing_default_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     pricing_min_decay_factor: float = Field(default=0.3, ge=0.0, le=1.0)
     pricing_max_decay_factor: float = Field(default=0.9, ge=0.0, le=1.0)
+    pricing_auto_crawl_enabled: bool = Field(default=False)
+    pricing_auto_crawl_deep: bool = Field(default=False)
 
     # Image constraints
     max_image_size_mb: float = Field(default=10.0, gt=0)
@@ -90,6 +95,15 @@ class Settings(BaseModel):
             raise ValueError(f"log_level must be one of {allowed}")
         return v.upper()
 
+    @field_validator("llm_provider")
+    @classmethod
+    def validate_llm_provider(cls, v: str) -> str:
+        allowed = {"auto", "gemini", "gguf"}
+        normalized = v.lower().strip()
+        if normalized not in allowed:
+            raise ValueError(f"llm_provider must be one of {allowed}")
+        return normalized
+
     class Config:
         env_prefix = "AI_"
         env_file = ".env"
@@ -99,15 +113,32 @@ class Settings(BaseModel):
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance."""
+    environment = os.getenv("AI_ENVIRONMENT", "development").lower()
+
+    def _parse_origins(raw: Optional[str]) -> List[str]:
+        if raw is None:
+            return [] if environment == "production" else ["*"]
+        stripped = raw.strip()
+        if not stripped:
+            return []
+        return [part.strip() for part in stripped.split(",") if part.strip()]
+
     return Settings(
         app_name=os.getenv("AI_APP_NAME", "CloseExp AI Service"),
         version=os.getenv("AI_APP_VERSION", "1.0.0"),
-        environment=os.getenv("AI_ENVIRONMENT", "development"),
+        environment=environment,
         debug=os.getenv("AI_DEBUG", "false").lower() == "true",
         host=os.getenv("AI_HOST", "0.0.0.0"),
         port=int(os.getenv("AI_PORT", "8000")),
+        workers=int(os.getenv("AI_WORKERS", "1")),
         api_key=os.getenv("AI_API_KEY"),
-        yolo_model_path=os.getenv("AI_YOLO_MODEL_PATH", "yolo11n.pt"),
+        api_key_header=os.getenv("AI_API_KEY_HEADER", "X-API-Key"),
+        allowed_origins=_parse_origins(os.getenv("AI_ALLOWED_ORIGINS")),
+        llm_provider=os.getenv("AI_LLM_PROVIDER", "auto"),
+        yolo_model_path=os.getenv(
+            "AI_YOLO_MODEL_PATH",
+            "/app/models/yolo11n.pt" if environment == "production" else "yolo11n.pt",
+        ),
         ocr_model_path=os.getenv("AI_OCR_MODEL_PATH"),
         gemini_api_key=os.getenv("AI_GEMINI_API_KEY"),
         gemini_model=os.getenv("AI_GEMINI_MODEL", "gemini-3.1-flash-lite-preview"),
@@ -122,8 +153,32 @@ def get_settings() -> Settings:
         llm_max_tokens=int(os.getenv("AI_LLM_MAX_TOKENS", "2048")),
         llm_temperature=float(os.getenv("AI_LLM_TEMPERATURE", "0.1")),
         llm_chat_format=os.getenv("AI_LLM_CHAT_FORMAT") or None,
+        pricing_auto_crawl_enabled=os.getenv("AI_PRICING_AUTO_CRAWL_ENABLED", "false").lower() == "true",
+        pricing_auto_crawl_deep=os.getenv("AI_PRICING_AUTO_CRAWL_DEEP", "false").lower() == "true",
         log_level=os.getenv("AI_LOG_LEVEL", "INFO"),
+        log_format=os.getenv("AI_LOG_FORMAT", "json"),
     )
+
+
+def validate_production_settings() -> None:
+    """Fail fast when production is misconfigured."""
+    if settings.environment != "production":
+        return
+
+    if not settings.api_key or len(settings.api_key) < 32:
+        raise RuntimeError(
+            "AI_API_KEY must be set to a random string of at least 32 characters in production."
+        )
+
+    if settings.llm_provider in {"auto", "gemini"} and not settings.gemini_api_key:
+        raise RuntimeError(
+            "AI_GEMINI_API_KEY is required in production when AI_LLM_PROVIDER is gemini or auto."
+        )
+
+    if settings.allowed_origins and "*" in settings.allowed_origins:
+        raise RuntimeError(
+            "AI_ALLOWED_ORIGINS must not include '*' in production (server-to-server only)."
+        )
 
 
 settings = get_settings()

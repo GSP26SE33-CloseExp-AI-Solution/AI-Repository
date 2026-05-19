@@ -1,0 +1,21 @@
+# Production runtime dependencies (Docker / Render / Railway)
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+python-dotenv
+
+requests
+httpx
+beautifulsoup4
+
+Pillow
+opencv-python-headless
+numpy
+
+ultralytics
+torch
+torchvision
+
+easyocr
+pyzbar

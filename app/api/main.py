@@ -5,9 +5,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import health, ocr, pricing
+from app.api import health, ocr, pricing, recommendation, tokens
 from app.core.config import settings
 from app.core.exceptions import AIServiceError
+from app.core.api_key_middleware import ApiKeyMiddleware
+from app.core.config import validate_production_settings
 from app.core.logging import get_logger, setup_logging
 from app.infra.model_store import model_store
 
@@ -17,6 +19,8 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown."""
+    validate_production_settings()
+
     # Startup
     logger.info(f"Starting {settings.app_name} v{settings.version}")
     logger.info(f"Environment: {settings.environment}")
@@ -48,14 +52,17 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.allowed_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS: disabled in production (BE calls server-to-server; browsers must not access AI)
+    if settings.allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.allowed_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST"],
+            allow_headers=["*"],
+        )
+
+    app.add_middleware(ApiKeyMiddleware)
 
     # Exception handlers
     @app.exception_handler(AIServiceError)
@@ -100,6 +107,8 @@ def create_app() -> FastAPI:
     app.include_router(health.router, tags=["Health"])
     app.include_router(ocr.router, prefix="/v1/ocr", tags=["OCR"])
     app.include_router(pricing.router, prefix="/v1/pricing", tags=["Pricing"])
+    app.include_router(recommendation.router, prefix="/v1/recommendation", tags=["Recommendation"])
+    app.include_router(tokens.router, prefix="/v1/tokens", tags=["Tokens"])
     return app
 
 

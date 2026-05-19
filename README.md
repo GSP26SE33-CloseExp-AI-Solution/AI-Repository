@@ -111,17 +111,36 @@ uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 
 ## Docker
 
-### Build và chạy
+### Local development
 
 ```bash
-docker-compose up --build
+cp .env.example .env
+# pip install -r requirements-dev.txt   # includes optional llama-cpp-python
+docker compose up --build
 ```
 
-### Chỉ build image
+### Production image (Gemini LLM, YOLO baked in, API key required)
 
 ```bash
-docker build -t closeexp-ai-service .
+docker compose -f docker-compose.prod.yml up --build
 ```
+
+Set in `.env` or platform secrets: `AI_API_KEY` (>=32 chars), `AI_GEMINI_API_KEY`.
+
+### Deploy on Render
+
+1. Connect repo → **New Web Service** → Runtime: **Docker**
+2. Use root `Dockerfile` and `render.yaml`
+3. Set secrets: `AI_API_KEY`, `AI_GEMINI_API_KEY`
+4. Point BE `AIService__BaseUrl` to Render AI URL; `AIService__ApiKey` = same `AI_API_KEY`
+
+### Requirements split
+
+| File | Use |
+|------|-----|
+| `requirements-prod.txt` | Docker / production |
+| `requirements-dev.txt` | Local dev + CI (+ llama-cpp optional) |
+| `requirements.txt` | Alias → dev |
 
 ## API Usage
 
@@ -190,7 +209,9 @@ pytest tests/services/test_pricing.py -v
 | `AI_ENVIRONMENT` | development | Environment (development/staging/production) |
 | `AI_DEBUG` | false | Debug mode |
 | `AI_PORT` | 8000 | Server port |
-| `AI_API_KEY` | - | API key (bỏ trống để disable) |
+| `AI_API_KEY` | - | **Required in production** — shared secret with BE (`AIService:ApiKey`) |
+| `AI_LLM_PROVIDER` | auto | `gemini` in production; `auto` tries GGUF then Gemini locally |
+| `AI_ALLOWED_ORIGINS` | *(empty prod)* | Leave empty in production (no browser access) |
 | `AI_YOLO_MODEL_PATH` | yolo11n.pt | Path đến YOLO model |
 | `AI_LOG_LEVEL` | INFO | Log level |
 | `AI_LOG_FORMAT` | json | Log format (json/console) |

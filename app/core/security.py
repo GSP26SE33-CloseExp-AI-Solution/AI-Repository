@@ -21,8 +21,16 @@ async def verify_api_key(
     Returns None if API key is not configured (dev mode).
     Raises HTTPException if key is invalid.
     """
-    # Skip validation if no API key is configured
+    # Skip validation only in non-production when no key is configured (local dev)
     if not settings.api_key:
+        if settings.environment == "production":
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error_code": "API_KEY_NOT_CONFIGURED",
+                    "message": "Server API key is not configured",
+                },
+            )
         return None
 
     if not api_key:

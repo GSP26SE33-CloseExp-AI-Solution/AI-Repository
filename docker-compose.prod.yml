@@ -1,21 +1,20 @@
+# Production-like local smoke test (uses production Dockerfile defaults + .env secrets)
 services:
   ai-service:
     build: .
-    container_name: closeexp-ai-service
+    container_name: closeexp-ai-service-prod
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
-      - AI_ENVIRONMENT=development
-      - AI_DEBUG=true
-      - AI_LOG_LEVEL=DEBUG
-      - AI_LOG_FORMAT=console
-      - AI_LLM_PROVIDER=auto
+      - AI_ENVIRONMENT=production
+      - AI_DEBUG=false
+      - AI_LOG_LEVEL=WARNING
+      - AI_LOG_FORMAT=json
+      - AI_LLM_PROVIDER=gemini
+      - AI_ALLOWED_ORIGINS=
       - AI_YOLO_MODEL_PATH=/app/models/yolo11n.pt
-    volumes:
-      - ./models:/app/models
-      - ./runs:/app/runs
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -23,9 +22,3 @@ services:
       start_period: 120s
       retries: 3
     restart: unless-stopped
-    networks:
-      - closeexp-network
-
-networks:
-  closeexp-network:
-    driver: bridge

@@ -1,0 +1,13 @@
+# Local development & CI (includes prod + optional local LLM + tooling)
+-r requirements-prod.txt
+
+# Optional local GGUF — not installed in production Docker image
+llama-cpp-python
+
+pytest
+pytest-asyncio
+pytest-cov
+
+ruff
+mypy
+pre-commit

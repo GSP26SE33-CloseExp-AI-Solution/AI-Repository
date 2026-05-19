@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: closeexp-ai-service
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: AI_ENVIRONMENT
+        value: production
+      - key: AI_DEBUG
+        value: "false"
+      - key: AI_LOG_LEVEL
+        value: WARNING
+      - key: AI_LOG_FORMAT
+        value: json
+      - key: AI_LLM_PROVIDER
+        value: gemini
+      - key: AI_YOLO_MODEL_PATH
+        value: /app/models/yolo11n.pt
+      - key: AI_ALLOWED_ORIGINS
+        value: ""
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_GEMINI_API_KEY
+        sync: false
