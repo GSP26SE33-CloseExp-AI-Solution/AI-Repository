@@ -1,8 +1,8 @@
 # Local development & CI (includes prod + optional local LLM + tooling)
 -r requirements-prod.txt
 
-# Optional local GGUF — not installed in production Docker image
-llama-cpp-python
+# Optional local GGUF — skip on Windows because source builds can fail on long paths
+llama-cpp-python; platform_system != "Windows"
 
 pytest
 pytest-asyncio
