@@ -33,14 +33,10 @@ async def ready() -> Dict[str, Any]:
     
     Used by Kubernetes/Docker health checks.
     """
-    checks: Dict[str, bool] = {}
-
-    # Check YOLO model
-    try:
-        model_store.load_yolo()
-        checks["yolo_model"] = True
-    except Exception:
-        checks["yolo_model"] = False
+    checks: Dict[str, bool] = {
+        "yolo_model": model_store.yolo_loaded,
+        "ocr_engine": model_store.ocr_loaded,
+    }
 
     all_ready = all(checks.values())
 
