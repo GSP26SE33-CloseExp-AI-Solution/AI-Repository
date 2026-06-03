@@ -66,12 +66,6 @@ class Settings(BaseModel):
     llm_cpu_threads: Optional[int] = Field(default=None, ge=1)
     llm_max_tokens: int = Field(default=2048, ge=64)
     llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
-    llm_timeout_ms: int = Field(default=20000, ge=1000)
-    llm_max_retries: int = Field(default=1, ge=0, le=5)
-    llm_fail_open: bool = Field(
-        default=True,
-        description="If true, fallback to next backend instead of raising on local/Gemini errors",
-    )
     llm_chat_format: Optional[str] = Field(
         default=None,
         description="Optional llama-cpp chat_format, e.g. gemma, gemma-2",
@@ -145,10 +139,7 @@ def get_settings() -> Settings:
             "AI_YOLO_MODEL_PATH",
             "/app/models/yolo11n.pt" if environment == "production" else "yolo11n.pt",
         ),
-        ocr_model_path=os.getenv(
-            "AI_OCR_MODEL_PATH",
-            "/app/models/easyocr" if environment == "production" else None,
-        ),
+        ocr_model_path=os.getenv("AI_OCR_MODEL_PATH"),
         gemini_api_key=os.getenv("AI_GEMINI_API_KEY"),
         gemini_model=os.getenv("AI_GEMINI_MODEL", "gemini-3.1-flash-lite-preview"),
         llm_gguf_path=os.getenv("AI_LLM_GGUF_PATH") or None,
@@ -161,9 +152,6 @@ def get_settings() -> Settings:
         ),
         llm_max_tokens=int(os.getenv("AI_LLM_MAX_TOKENS", "2048")),
         llm_temperature=float(os.getenv("AI_LLM_TEMPERATURE", "0.1")),
-        llm_timeout_ms=int(os.getenv("AI_LLM_TIMEOUT_MS", "20000")),
-        llm_max_retries=int(os.getenv("AI_LLM_MAX_RETRIES", "1")),
-        llm_fail_open=os.getenv("AI_LLM_FAIL_OPEN", "true").lower() == "true",
         llm_chat_format=os.getenv("AI_LLM_CHAT_FORMAT") or None,
         pricing_auto_crawl_enabled=os.getenv("AI_PRICING_AUTO_CRAWL_ENABLED", "false").lower() == "true",
         pricing_auto_crawl_deep=os.getenv("AI_PRICING_AUTO_CRAWL_DEEP", "false").lower() == "true",

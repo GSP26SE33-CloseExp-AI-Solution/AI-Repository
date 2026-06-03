@@ -9,7 +9,6 @@ Phase 2: Collect pairs under data/ocr_corrections/ for fine-tuning / distillatio
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import time
@@ -18,7 +17,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-from pydantic import BaseModel, ValidationError, field_validator
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -84,68 +82,6 @@ Hãy trả về JSON duy nhất theo schema sau:
 # ---------------------------------------------------------------------------
 
 DATA_COLLECTION_DIR = Path("data/ocr_corrections")
-ALLOWED_CATEGORIES = {
-    "meat",
-    "seafood",
-    "dairy",
-    "bakery",
-    "beverage",
-    "snack",
-    "condiment",
-    "canned_food",
-    "frozen_food",
-    "vegetable",
-    "fruit",
-    "instant_food",
-    "other",
-}
-
-
-class PackagingLLMResult(BaseModel):
-    """Strict-but-tolerant normalized result for packaging extraction."""
-
-    name: Optional[str] = None
-    brand: Optional[str] = None
-    ingredients: Optional[str] = None
-    storage_instructions: Optional[str] = None
-    usage_instructions: Optional[str] = None
-    warnings: Optional[str] = None
-    weight: Optional[str] = None
-    manufacturer: Optional[str] = None
-    category: Optional[str] = None
-    quality_standards: Optional[str] = None
-
-    @field_validator(
-        "name",
-        "brand",
-        "ingredients",
-        "storage_instructions",
-        "usage_instructions",
-        "warnings",
-        "weight",
-        "manufacturer",
-        "quality_standards",
-        mode="before",
-    )
-    @classmethod
-    def normalize_text(cls, v: Any) -> Optional[str]:
-        if v is None:
-            return None
-        if isinstance(v, list):
-            parts = [str(item).strip() for item in v if str(item).strip()]
-            return ", ".join(parts) if parts else None
-        text = str(v).strip()
-        return text if text else None
-
-    @field_validator("category", mode="before")
-    @classmethod
-    def normalize_category(cls, v: Any) -> Optional[str]:
-        if v is None:
-            return None
-        text = str(v).strip().lower()
-        if not text:
-            return None
-        return text if text in ALLOWED_CATEGORIES else "other"
 
 
 def _save_training_pair(
@@ -317,99 +253,30 @@ class LLMPostProcessor:
                 )
         return regions_data
 
-    async def _call_with_retry(
-        self,
-        *,
-        backend_name: str,
-        call_coro: Any,
-    ) -> Optional[str]:
-        retries = max(0, int(getattr(settings, "llm_max_retries", 1)))
-        timeout_s = max(1.0, float(getattr(settings, "llm_timeout_ms", 20000)) / 1000.0)
-
-        for attempt in range(1, retries + 2):
-            start = time.perf_counter()
-            try:
-                result = await asyncio.wait_for(call_coro(), timeout=timeout_s)
-                elapsed = (time.perf_counter() - start) * 1000
-                logger.info(
-                    "LLM backend call completed (backend=%s, attempt=%s, latency_ms=%.0f)",
-                    backend_name,
-                    attempt,
-                    elapsed,
-                )
-                return result
-            except TimeoutError:
-                logger.warning(
-                    "LLM backend timeout (backend=%s, reason_code=timeout, attempt=%s, timeout_ms=%s)",
-                    backend_name,
-                    attempt,
-                    getattr(settings, "llm_timeout_ms", 20000),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "LLM backend error (backend=%s, reason_code=backend_error, attempt=%s): %s",
-                    backend_name,
-                    attempt,
-                    exc,
-                )
-
-        return None
-
-    def _validate_llm_result(
-        self,
-        candidate: Dict[str, Any],
-        *,
-        backend_name: str,
-    ) -> Dict[str, Any]:
-        try:
-            validated = PackagingLLMResult.model_validate(candidate)
-            return validated.model_dump(exclude_none=True)
-        except ValidationError as exc:
-            logger.warning(
-                "LLM schema validation failed (backend=%s, reason_code=schema_validation_error): %s",
-                backend_name,
-                exc,
-            )
-            # Partial-accept strategy: normalize known keys and keep usable values only.
-            fallback = {}
-            for key in PackagingLLMResult.model_fields.keys():
-                if key not in candidate:
-                    continue
-                try:
-                    one = PackagingLLMResult.model_validate({key: candidate.get(key)})
-                    value = one.model_dump(exclude_none=True).get(key)
-                    if value is not None:
-                        fallback[key] = value
-                except ValidationError:
-                    continue
-            return fallback
-
     async def _try_llm_backends(
         self,
         ocr_data: Dict[str, Any],
         user_prompt: str,
         raw_text: str,
         regions_data: List[Dict[str, Any]],
-    ) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    ) -> Optional[Dict[str, Any]]:
         """
         Try local GGUF then Gemini. On success, save training pair and return merged dict.
         """
-        meta: Dict[str, Any] = {"backend": "none", "fallback_depth": 0, "reason_codes": []}
         use_gguf = (
             settings.llm_provider in {"auto", "gguf"}
             and local_gguf_llm.local_gguf_configured()
         )
         if use_gguf:
             start = time.perf_counter()
-            raw_local = await self._call_with_retry(
-                backend_name="local_gguf",
-                call_coro=lambda: local_gguf_llm.generate(SYSTEM_PROMPT, user_prompt),
-            )
+            try:
+                raw_local = await local_gguf_llm.generate(SYSTEM_PROMPT, user_prompt)
+            except Exception as e:
+                logger.warning("Local GGUF call failed: %s", e)
+                raw_local = None
             llm_time_ms = (time.perf_counter() - start) * 1000
             if raw_local:
                 llm_result = self._parse_llm_response(raw_local)
-                if llm_result:
-                    llm_result = self._validate_llm_result(llm_result, backend_name="local_gguf")
                 if llm_result:
                     path = getattr(settings, "llm_gguf_path", "") or ""
                     model_label = Path(str(path)).name if path else "local_gguf"
@@ -422,33 +289,18 @@ class LLMPostProcessor:
                         backend="local_gguf",
                         model_label=model_label,
                     )
-                    merged = self._merge_results(ocr_data, llm_result, llm_time_ms)
-                    meta.update(
-                        {
-                            "backend": "local_gguf",
-                            "latency_ms": round(llm_time_ms, 2),
-                            "fallback_depth": 0,
-                        }
-                    )
-                    return merged, meta
-                meta["reason_codes"].append("json_parse_error_gguf")
+                    return self._merge_results(ocr_data, llm_result, llm_time_ms)
                 logger.warning("Local GGUF returned unparseable JSON; trying Gemini")
             else:
-                meta["reason_codes"].append("empty_or_timeout_gguf")
                 logger.warning("Local GGUF empty response; trying Gemini")
 
         use_gemini = settings.llm_provider in {"auto", "gemini"}
         if use_gemini and self.gemini.is_available:
             start = time.perf_counter()
-            raw_cloud = await self._call_with_retry(
-                backend_name="gemini",
-                call_coro=lambda: self.gemini.generate(SYSTEM_PROMPT, user_prompt),
-            )
+            raw_cloud = await self.gemini.generate(SYSTEM_PROMPT, user_prompt)
             llm_time_ms = (time.perf_counter() - start) * 1000
             if raw_cloud:
                 llm_result = self._parse_llm_response(raw_cloud)
-                if llm_result:
-                    llm_result = self._validate_llm_result(llm_result, backend_name="gemini")
                 if llm_result:
                     logger.info("LLM post-processing (Gemini) in %.0fms", llm_time_ms)
                     _save_training_pair(
@@ -459,24 +311,13 @@ class LLMPostProcessor:
                         backend="gemini",
                         model_label=settings.gemini_model,
                     )
-                    merged = self._merge_results(ocr_data, llm_result, llm_time_ms)
-                    meta.update(
-                        {
-                            "backend": "gemini",
-                            "latency_ms": round(llm_time_ms, 2),
-                            "fallback_depth": 1 if use_gguf else 0,
-                        }
-                    )
-                    return merged, meta
-                meta["reason_codes"].append("json_parse_error_gemini")
+                    return self._merge_results(ocr_data, llm_result, llm_time_ms)
                 logger.warning("Gemini returned unparseable JSON")
             else:
-                meta["reason_codes"].append("empty_or_timeout_gemini")
                 logger.warning("Gemini returned empty response")
 
         reasons: List[str] = []
         if settings.llm_provider == "gguf" and not local_gguf_llm.local_gguf_configured():
-            meta["reason_codes"].append("gguf_not_configured")
             reasons.append("AI_LLM_PROVIDER=gguf but no valid AI_LLM_GGUF_PATH")
         elif use_gguf:
             reasons.append("local GGUF did not return parseable JSON (see warnings above)")
@@ -485,23 +326,17 @@ class LLMPostProcessor:
         elif local_gguf_llm.local_gguf_configured() is False:
             raw_p = getattr(settings, "llm_gguf_path", None)
             if raw_p and str(raw_p).strip():
-                meta["reason_codes"].append("gguf_path_invalid")
                 reasons.append(f"local GGUF path invalid or file missing ({raw_p})")
             else:
-                meta["reason_codes"].append("gguf_not_configured")
                 reasons.append("local GGUF not configured (AI_LLM_GGUF_PATH)")
         if use_gemini:
             if self.gemini.is_available:
                 reasons.append("Gemini did not return parseable JSON or returned empty (see warnings above)")
             else:
-                meta["reason_codes"].append("gemini_not_configured")
                 reasons.append("Gemini not configured (AI_GEMINI_API_KEY or GEMINI_API_KEY)")
-        logger.warning(
-            "LLM OCR post-process skipped (backend=none, reason_code=fallback_to_rule_based): %s",
-            " | ".join(reasons),
-        )
+        logger.warning("LLM OCR post-process skipped: %s", " | ".join(reasons))
 
-        return None, meta
+        return None
     
     async def process_ocr_response(
         self,
@@ -519,15 +354,9 @@ class LLMPostProcessor:
         user_prompt = self._build_prompt(ocr_data)
         regions_data = self._regions_snapshot(text_regions)
 
-        merged, meta = await self._try_llm_backends(ocr_data, user_prompt, raw_text, regions_data)
+        merged = await self._try_llm_backends(ocr_data, user_prompt, raw_text, regions_data)
         if merged is not None:
-            merged["_llm_meta"] = meta
             return merged
-
-        if not getattr(settings, "llm_fail_open", True):
-            raise RuntimeError(
-                f"LLM processing failed with fail_open disabled. reasons={meta.get('reason_codes')}"
-            )
 
         logger.info("Using rule-based OCR post-processing (LLM backends unavailable or failed)")
         start_rb = time.perf_counter()
@@ -542,12 +371,6 @@ class LLMPostProcessor:
             backend="rule_based",
             model_label="text_postprocessor",
         )
-        rule_out["_llm_meta"] = {
-            "backend": "rule_based",
-            "fallback_depth": 2,
-            "reason_codes": meta.get("reason_codes") or ["fallback_to_rule_based"],
-            "latency_ms": round(rb_ms, 2),
-        }
         return rule_out
 
     @staticmethod

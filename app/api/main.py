@@ -1,4 +1,3 @@
-import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict
 
@@ -26,21 +25,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"Starting {settings.app_name} v{settings.version}")
     logger.info(f"Environment: {settings.environment}")
 
-    # Pre-load models before accepting traffic (avoids OOM/timeouts on first OCR request)
+    # Pre-load models
     try:
-        await asyncio.to_thread(model_store.load_yolo)
+        model_store.load_yolo()
         logger.info("YOLO model pre-loaded successfully")
     except Exception as e:
-        logger.warning("Failed to pre-load YOLO model: %s", e)
-
-    try:
-        engine = await asyncio.to_thread(model_store.load_ocr)
-        if engine is None:
-            logger.warning("OCR engine not available at startup")
-        else:
-            logger.info("OCR engine pre-loaded successfully")
-    except Exception as e:
-        logger.warning("Failed to pre-load OCR engine: %s", e)
+        logger.warning(f"Failed to pre-load YOLO model: {e}")
 
     yield
 

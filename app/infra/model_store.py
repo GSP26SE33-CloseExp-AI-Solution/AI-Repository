@@ -60,8 +60,6 @@ class ModelStore:
         if self._ocr_engine is not None:
             return self._ocr_engine
 
-        langs = settings.ocr_supported_languages
-
         # Try PaddleOCR first
         try:
             from paddleocr import PaddleOCR  # type: ignore
@@ -81,36 +79,15 @@ class ModelStore:
         try:
             import easyocr  # type: ignore
 
-            reader_kwargs: dict[str, Any] = {"gpu": False}
-            if settings.ocr_model_path:
-                reader_kwargs["model_storage_directory"] = settings.ocr_model_path
-                logger.info(
-                    "Loading EasyOCR engine (langs=%s, model_dir=%s)",
-                    langs,
-                    settings.ocr_model_path,
-                )
-            else:
-                logger.info("Loading EasyOCR engine (langs=%s)", langs)
-
-            self._ocr_engine = easyocr.Reader(langs, **reader_kwargs)
+            logger.info("Loading EasyOCR engine")
+            self._ocr_engine = easyocr.Reader(["vi", "en"], gpu=False)
             logger.info("EasyOCR loaded successfully")
             return self._ocr_engine
         except ImportError:
             pass
-        except Exception as e:
-            logger.error("Failed to load EasyOCR: %s", e)
-            raise
 
         logger.warning("No OCR engine available")
         return None
-
-    @property
-    def yolo_loaded(self) -> bool:
-        return self._yolo_model is not None
-
-    @property
-    def ocr_loaded(self) -> bool:
-        return self._ocr_engine is not None
 
     def load_pricing(self) -> Any:
         """

@@ -26,7 +26,6 @@ from app.services.vietnamese_product import vn_product_service
 from app.services.text_postprocessor import text_postprocessor
 from app.services.region_based_extractor import region_extractor
 from app.services.llm_postprocessor import llm_postprocessor
-from app.infra.model_store import model_store
 
 logger = get_logger(__name__)
 
@@ -51,15 +50,34 @@ class OCRService:
     MFG_KEYWORDS = ["nsx", "mfg", "san xuat", "sản xuất", "production"]
 
     def __init__(self) -> None:
+        self._ocr_engine: Optional[Any] = None
         self._barcode_reader: Optional[Any] = None
 
     def _get_ocr_engine(self) -> Any:
-        """Return shared OCR engine from model_store (pre-loaded at startup)."""
-        engine = model_store.load_ocr()
-        if engine is None:
-            logger.warning("No OCR engine available, using placeholder")
-            return "placeholder"
-        return engine
+        """Lazy load OCR engine (PaddleOCR or EasyOCR)."""
+        if self._ocr_engine is None:
+            try:
+                from paddleocr import PaddleOCR  # type: ignore
+
+                self._ocr_engine = PaddleOCR(
+                    use_angle_cls=True,
+                    lang="vi",
+                    show_log=False,
+                )
+                logger.info("Loaded PaddleOCR engine")
+            except ImportError:
+                try:
+                    import easyocr  # type: ignore
+
+                    self._ocr_engine = easyocr.Reader(
+                        ["vi", "en"],
+                        gpu=False,
+                    )
+                    logger.info("Loaded EasyOCR engine")
+                except ImportError:
+                    logger.warning("No OCR engine available, using placeholder")
+                    self._ocr_engine = "placeholder"
+        return self._ocr_engine
 
     def _get_barcode_reader(self) -> Any:
         """Lazy load barcode reader."""
