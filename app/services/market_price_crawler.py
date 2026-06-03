@@ -28,6 +28,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+MAX_RESULT_SOURCES = 10
 
 
 @dataclass
@@ -194,6 +195,12 @@ class DirectSiteCrawler:
                 "search_url": "https://cooponline.vn/tim-kiem/?q={query}",
                 "price_selectors": [".price", ".woocommerce-Price-amount"],
             },
+            {
+                "name": "Siêu thị Genshai",
+                "domain": "genshai.com.vn",
+                "search_url": "https://genshai.com.vn/search?q={query}",
+                "price_selectors": [".price", ".product-price", ".product-item-price", "[class*='price']"],
+            },
         ]
     
     async def search_product(
@@ -262,7 +269,11 @@ class DirectSiteCrawler:
                             if price:
                                 # Tìm tên sản phẩm gần element này
                                 prod_name = self._find_product_name(elem, soup)
-                                
+                                if not _is_relevant_listing(prod_name, product_name, barcode):
+                                    continue
+
+                                key = _store_key(site["domain"], site["name"])
+                                store_label = _display_store_name(key, site["name"], site["domain"])
                                 results.append(MarketPriceResult(
                                     barcode=barcode,
                                     product_name=prod_name,
@@ -270,12 +281,13 @@ class DirectSiteCrawler:
                                     original_price=None,
                                     source=site["domain"],
                                     source_url=search_url,
-                                    store_name=site["name"],
+                                    store_name=store_label,
                                     unit=None,
                                     weight=None,
                                     is_in_stock=True,
                                     confidence=0.8,
                                 ))
+                                break
                     
                     # Fallback: tìm trong toàn bộ text
                     if not results:
@@ -324,6 +336,68 @@ class DirectSiteCrawler:
             parent = parent.parent
         
         return None
+
+
+def _tokenize_name(text: str) -> set[str]:
+    if not text:
+        return set()
+    return {
+        token
+        for token in re.split(r"[\s,.\-/()]+", text.lower())
+        if len(token) > 1
+    }
+
+
+def _is_relevant_listing(
+    listing_title: Optional[str],
+    product_name: Optional[str],
+    barcode: str,
+) -> bool:
+    title = (listing_title or "").lower()
+    if barcode and barcode in title:
+        return True
+    if not product_name:
+        return True
+    expected = _tokenize_name(product_name)
+    if not expected:
+        return True
+    observed = _tokenize_name(listing_title or "")
+    overlap = len(expected & observed)
+    if len(expected) <= 2:
+        return overlap >= 1
+    return overlap >= min(2, len(expected))
+
+
+def _store_key(source: Optional[str], store_name: Optional[str]) -> str:
+    candidate = (source or store_name or "").strip().lower()
+    if not candidate:
+        return "unknown"
+    if "://" in candidate:
+        candidate = urlparse(candidate).netloc
+    candidate = candidate.replace("www.", "").strip()
+    if not candidate:
+        return "unknown"
+    return candidate.split(":")[0]
+
+
+def _display_store_name(store_key: str, store_name: Optional[str], source: Optional[str]) -> str:
+    if store_name and store_name.strip():
+        return store_name.strip()
+    if source and source.strip():
+        return source.strip().replace("www.", "")
+    return store_key
+
+
+def _filter_outlier_prices(results: List[MarketPriceResult]) -> List[MarketPriceResult]:
+    if len(results) < 3:
+        return results
+    prices = sorted(r.price for r in results)
+    median = prices[len(prices) // 2]
+    if median <= 0:
+        return results
+    low = median / 3
+    high = median * 3
+    return [r for r in results if low <= r.price <= high]
 
 
 class GoogleSearchCrawler:
@@ -390,7 +464,7 @@ class GoogleSearchCrawler:
                 search_results = soup.select('.result')
                 logger.info(f"DuckDuckGo found {len(search_results)} results")
                 
-                for result_div in search_results[:15]:
+                for result_div in search_results[:25]:
                     try:
                         # Get title
                         title_elem = result_div.select_one('.result__title')
@@ -429,7 +503,9 @@ class GoogleSearchCrawler:
                         
                         store_name = self._get_store_name(domain or title)
                         
-                        if price:
+                        if price and _is_relevant_listing(title, product_name, barcode):
+                            key = _store_key(domain, store_name)
+                            store_name = _display_store_name(key, store_name, domain)
                             results.append(MarketPriceResult(
                                 barcode=barcode,
                                 product_name=title or product_name,
@@ -448,9 +524,13 @@ class GoogleSearchCrawler:
                         else:
                             # Không có giá trong snippet, nhưng có URL để deep crawl sau
                             # Lưu lại URL để deep crawl
-                            if url and url.startswith('http') and any(
-                                k in domain.lower() for k in self.store_mapping.keys()
+                            if (
+                                url
+                                and url.startswith('http')
+                                and _is_relevant_listing(title, product_name, barcode)
                             ):
+                                key = _store_key(domain, store_name)
+                                store_name = _display_store_name(key, store_name, domain)
                                 results.append(MarketPriceResult(
                                     barcode=barcode,
                                     product_name=title or product_name,
@@ -514,6 +594,9 @@ class ProductPageCrawler:
                     return None
                 
                 html = response.text
+                if barcode and barcode not in html:
+                    return None
+
                 soup = BeautifulSoup(html, 'html.parser')
                 
                 # Tìm giá bằng nhiều selectors
@@ -527,13 +610,15 @@ class ProductPageCrawler:
                 for selector in price_selectors:
                     elem = soup.select_one(selector)
                     if elem:
-                        price = PriceExtractor.extract_price(elem.get_text(), exclude_barcode=self.barcode if hasattr(self, 'barcode') else None)
+                        price = PriceExtractor.extract_price(elem.get_text(), exclude_barcode=barcode)
                         if price:
                             # Tìm tên sản phẩm
                             title_elem = soup.select_one('h1, .product-name, .product-title')
                             title = title_elem.get_text(strip=True) if title_elem else None
                             
                             domain = urlparse(url).netloc.replace('www.', '')
+                            key = _store_key(domain, domain)
+                            store_label = _display_store_name(key, None, domain)
                             
                             return MarketPriceResult(
                                 barcode=barcode,
@@ -542,7 +627,7 @@ class ProductPageCrawler:
                                 original_price=None,
                                 source=domain,
                                 source_url=url,
-                                store_name=domain.split('.')[0].title(),
+                                store_name=store_label,
                                 unit=None,
                                 weight=None,
                                 is_in_stock=True,
@@ -670,30 +755,40 @@ class MarketPriceCrawlerService:
             
             logger.info(f"Deep crawl added {deep_count} more prices")
         
-        # Lọc bỏ entries không có giá
-        results = [r for r in results if r.price > 0]
-        
+        # Lọc bỏ entries không có giá hoặc không liên quan tới sản phẩm
+        results = [
+            r for r in results
+            if r.price > 0
+            and _is_relevant_listing(r.product_name, product_name, barcode or "")
+        ]
+        results = _filter_outlier_prices(results)
+
         # Deduplicate và sắp xếp
         results = self._deduplicate(results)
         results.sort(key=lambda x: x.price)
+        results = results[:MAX_RESULT_SOURCES]
         
         logger.info(f"Total unique prices found: {len(results)}")
         
         return results
     
     def _deduplicate(self, results: List[MarketPriceResult]) -> List[MarketPriceResult]:
-        """Loại bỏ giá trùng lặp."""
-        seen = set()
-        unique = []
-        
+        """Giữ một giá tốt nhất cho mỗi domain nguồn."""
+        by_store: Dict[str, MarketPriceResult] = {}
+
         for r in results:
-            # Key = (source, price rounded to nearest 100)
-            key = (r.source, round(r.price / 100) * 100)
-            if key not in seen:
-                seen.add(key)
-                unique.append(r)
-        
-        return unique
+            key = _store_key(r.source, r.store_name)
+            r.store_name = _display_store_name(key, r.store_name, r.source)
+            existing = by_store.get(key)
+            if not existing:
+                by_store[key] = r
+                continue
+            if r.confidence > existing.confidence:
+                by_store[key] = r
+            elif r.confidence == existing.confidence and r.price < existing.price:
+                by_store[key] = r
+
+        return list(by_store.values())
     
     def get_price_stats(self, prices: List[MarketPriceResult]) -> Dict[str, Any]:
         """Tính thống kê giá."""
